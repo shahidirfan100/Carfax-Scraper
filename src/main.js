@@ -1,5 +1,5 @@
-// Carfax Used Cars Scraper - Camoufox Stealth Browser with MobX Extraction
-// Bypasses DataDome anti-bot using Camoufox + direct MobX state extraction
+// Carfax Used Cars Scraper - Camoufox with US Geolocation
+// Bypasses DataDome anti-bot using Camoufox + US residential proxies
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Actor, log } from 'apify';
@@ -61,9 +61,10 @@ async function main() {
 
         log.info(`Starting Carfax scraper with URLs: ${initial.join(', ')}`);
 
-        // Configure proxy for Camoufox
+        // Configure US-based residential proxy
         const proxyConfiguration = await Actor.createProxyConfiguration({
             groups: ['RESIDENTIAL'],
+            countryCode: 'US',  // Force US-based proxy
         });
 
         let saved = 0;
@@ -90,9 +91,9 @@ async function main() {
             };
         }
 
-        // Get Camoufox launch options with proxy
+        // Get Camoufox launch options with US proxy
         const proxyUrl = await proxyConfiguration.newUrl();
-        log.info('Camoufox configured with residential proxy');
+        log.info('Camoufox configured with US residential proxy');
 
         const crawler = new PlaywrightCrawler({
             proxyConfiguration,
@@ -110,16 +111,20 @@ async function main() {
             requestHandlerTimeoutSecs: 120,
             useSessionPool: true,
 
-            // Block trackers for performance
             preNavigationHooks: [
                 async ({ page }) => {
+                    // Set US locale
+                    await page.setExtraHTTPHeaders({
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    });
+
+                    // Block trackers
                     await page.route('**/*', (route) => {
                         const url = route.request().url();
                         if (url.includes('google-analytics') ||
                             url.includes('googletagmanager') ||
                             url.includes('facebook.net') ||
-                            url.includes('doubleclick') ||
-                            url.includes('hotjar')) {
+                            url.includes('doubleclick')) {
                             return route.abort();
                         }
                         return route.continue();
@@ -131,31 +136,63 @@ async function main() {
                 const pageNo = request.userData?.pageNo || 1;
                 log.info(`Processing page ${pageNo}: ${request.url}`);
 
-                // Wait for page to fully load
+                // Wait for page to load
                 await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => { });
-                await page.waitForTimeout(3000);
+                await page.waitForTimeout(2000);
+
+                // Handle cookie consent popup (European GDPR)
+                try {
+                    const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("accept"), button:has-text("Continue"), [class*="accept"], [class*="consent"]').first();
+                    if (await acceptBtn.isVisible({ timeout: 3000 })) {
+                        await acceptBtn.click();
+                        log.info('Clicked cookie consent button');
+                        await page.waitForTimeout(1000);
+                    }
+                } catch (e) {
+                    // No consent popup
+                }
+
+                // Check if we're on the right page (US Carfax with search results)
+                const pageContent = await page.content();
+                const currentUrl = page.url();
+
+                // Detect if we got redirected to European site
+                if (currentUrl.includes('carfax.eu') ||
+                    pageContent.includes('La confiance') ||
+                    pageContent.includes('carfax.eu')) {
+                    log.warning('Redirected to European Carfax site, retrying with US proxy...');
+                    throw new Error('Redirected to non-US site');
+                }
+
+                // Check if we got a homepage instead of search results
+                if (!currentUrl.includes('Used-') && !pageContent.includes('srp-list-item')) {
+                    log.warning(`Got homepage instead of search results: ${currentUrl}`);
+                    // Save screenshot for debugging
+                    const kvStore = await Actor.openKeyValueStore();
+                    const screenshot = await page.screenshot({ fullPage: true });
+                    await kvStore.setValue(`wrong-page-${Date.now()}`, screenshot, { contentType: 'image/png' });
+                    throw new Error('Got homepage instead of search results');
+                }
+
+                await page.waitForTimeout(2000);
 
                 let vehicles = [];
                 let source = 'unknown';
 
-                // PRIORITY 1: Extract from MobX state (fastest & most reliable)
+                // PRIORITY 1: Extract from MobX state
                 try {
                     vehicles = await page.evaluate(() => {
                         const state = window.__MOBX_STATE__;
                         if (!state) return [];
 
-                        // Try SearchRequestStore first
                         const searchStore = state.SearchRequestStore;
                         if (searchStore?.results?.listings) {
                             return searchStore.results.listings;
                         }
-
-                        // Alternative paths
                         if (searchStore?.searchResults?.listings) {
                             return searchStore.searchResults.listings;
                         }
 
-                        // Search all stores
                         for (const key of Object.keys(state)) {
                             const store = state[key];
                             if (store?.results?.listings) return store.results.listings;
@@ -210,16 +247,14 @@ async function main() {
                     }
                 }
 
-                // No data found - save debug screenshot
+                // No data found
                 if (vehicles.length === 0) {
                     log.warning('No vehicles found on page');
                     const kvStore = await Actor.openKeyValueStore();
                     const screenshot = await page.screenshot({ fullPage: true });
                     await kvStore.setValue(`debug-page-${pageNo}-${Date.now()}`, screenshot, { contentType: 'image/png' });
 
-                    // Check if blocked
-                    const content = await page.content();
-                    if (content.includes('datadome') || content.includes('captcha')) {
+                    if (pageContent.includes('datadome') || pageContent.includes('captcha')) {
                         log.error('Detected anti-bot blocking page');
                     }
                     return;
@@ -261,7 +296,6 @@ async function main() {
                         while (saved < RESULTS_WANTED && currentPage <= MAX_PAGES) {
                             await page.waitForTimeout(2000);
 
-                            // Extract from MobX
                             let nextVehicles = await page.evaluate(() => {
                                 const state = window.__MOBX_STATE__;
                                 return state?.SearchRequestStore?.results?.listings || [];
@@ -286,9 +320,10 @@ async function main() {
                                 }
 
                                 log.info(`Saved ${saved}/${RESULTS_WANTED} vehicles`);
+                            } else {
+                                break;
                             }
 
-                            // Check for next page
                             const canContinue = await page.evaluate(() => {
                                 const btn = document.querySelector('button.pagination_pages_nav:not([disabled])');
                                 return btn?.textContent?.includes('Next');
@@ -307,14 +342,6 @@ async function main() {
 
             async failedRequestHandler({ request }, error) {
                 log.error(`Request failed: ${request.url}`, { error: error.message });
-
-                // Save error to KV store for debugging
-                const kvStore = await Actor.openKeyValueStore();
-                await kvStore.setValue(`error-${Date.now()}`, {
-                    url: request.url,
-                    error: error.message,
-                    stack: error.stack,
-                });
             },
         });
 
