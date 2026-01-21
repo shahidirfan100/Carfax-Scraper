@@ -1,0 +1,96 @@
+{
+  "title": "Carfax Used Cars Scraper",
+  "description": "Scrape used car listings from Carfax.com. Provide a start URL or use filters like make, model, price range, and mileage. Extracts detailed vehicle information including VIN, price, mileage, and Carfax reports.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Start scraping from a specific Carfax search URL. If provided, this will be used instead of filters.",
+      "editor": "textfield",
+      "prefill": "https://www.carfax.com/Used-Pickups_bt6"
+    },
+    "make": {
+      "title": "Make",
+      "type": "string",
+      "description": "Vehicle make (e.g., 'Ford', 'Toyota', 'Chevrolet').",
+      "editor": "textfield"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string",
+      "description": "Vehicle model (e.g., 'F-150', 'Camry', 'Silverado').",
+      "editor": "textfield"
+    },
+    "year_min": {
+      "title": "Minimum Year",
+      "type": "integer",
+      "description": "Minimum model year filter.",
+      "editor": "number",
+      "minimum": 1990
+    },
+    "year_max": {
+      "title": "Maximum Year",
+      "type": "integer",
+      "description": "Maximum model year filter.",
+      "editor": "number"
+    },
+    "price_min": {
+      "title": "Minimum Price",
+      "type": "integer",
+      "description": "Minimum price filter in USD.",
+      "editor": "number",
+      "minimum": 0
+    },
+    "price_max": {
+      "title": "Maximum Price",
+      "type": "integer",
+      "description": "Maximum price filter in USD.",
+      "editor": "number"
+    },
+    "mileage_max": {
+      "title": "Maximum Mileage",
+      "type": "integer",
+      "description": "Maximum mileage filter.",
+      "editor": "number",
+      "minimum": 0
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Location or ZIP code to search near.",
+      "editor": "textfield"
+    },
+    "results_wanted": {
+      "title": "Maximum number of vehicles",
+      "type": "integer",
+      "description": "The maximum number of vehicles to collect.",
+      "minimum": 1,
+      "default": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum number of pages",
+      "type": "integer",
+      "description": "A safety cap on the number of search result pages to visit.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 10
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy (residential recommended for Carfax).",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
