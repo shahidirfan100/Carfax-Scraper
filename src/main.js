@@ -1,10 +1,18 @@
-// Carfax Used Cars Scraper - Production Ready
-// Primary: MobX state extraction | Fallback: API interception | Last resort: DOM parsing
+// Carfax Used Cars Scraper - Production Ready with Anti-Bot Bypass
+// Strategy: CheerioCrawler with got-scraping (fingerprint rotation) -> Playwright fallback
 import { Actor, log } from 'apify';
-import { PlaywrightCrawler, Dataset } from 'crawlee';
+import { CheerioCrawler, PlaywrightCrawler, Dataset } from 'crawlee';
 import { firefox } from 'playwright';
 
 await Actor.init();
+
+// User agents pool for rotation
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+];
 
 async function main() {
     try {
@@ -24,12 +32,13 @@ async function main() {
             results_wanted: RESULTS_WANTED_RAW = 20,
             max_pages: MAX_PAGES_RAW = 50,
             proxyConfiguration,
+            use_browser = false, // Force browser mode if needed
         } = input;
 
         const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
         const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 50;
 
-        // Build start URL from parameters if not provided
+        // Build start URL from parameters
         const buildStartUrl = () => {
             const baseUrl = 'https://www.carfax.com/Used-';
             let path = 'Cars';
@@ -58,22 +67,22 @@ async function main() {
         if (url) initial.push(url);
         if (!initial.length) initial.push(buildStartUrl());
 
-        // Configure proxy with fallback - fix for NS_ERROR_PROXY_CONNECTION_REFUSED
+        log.info(`Starting scraper with URLs: ${initial.join(', ')}`);
+
+        // Configure proxy - only use if explicitly provided with residential
         let proxyConf = undefined;
-        if (proxyConfiguration) {
+        if (proxyConfiguration && proxyConfiguration.useApifyProxy) {
             try {
                 proxyConf = await Actor.createProxyConfiguration(proxyConfiguration);
-                log.info('Proxy configuration created successfully');
+                log.info('Proxy configuration created');
             } catch (e) {
-                log.warning(`Proxy configuration failed: ${e.message}. Running without proxy.`);
-                proxyConf = undefined;
+                log.warning(`Proxy setup failed: ${e.message}. Running without proxy.`);
             }
         }
 
         let saved = 0;
-        let interceptedApiData = [];
 
-        // Normalize vehicle data from MobX state
+        // Normalize vehicle data
         function normalizeVehicle(item) {
             return {
                 vin: item.vin || null,
@@ -87,347 +96,357 @@ async function main() {
                 mileage: typeof item.mileage === 'object' ? item.mileage.value : item.mileage || null,
                 mileage_label: typeof item.mileage === 'object' ? item.mileage.label : null,
                 badge: item.badge || null,
+                image_url: item.primaryImageUrl || item.imageUrl || null,
+                url: item.vehicleUrl || item.url || null,
+                dealer_name: item.dealerName || null,
                 distance_to_dealer: item.distanceToDealer || null,
-                image_url: item.primaryImageUrl || item.imageUrl || item.images?.[0] || null,
-                url: item.vehicleUrl || item.url || item.detailPageUrl || null,
-                stock_number: item.stockNumber || null,
-                dealer_name: item.dealerName || item.seller?.name || null,
             };
         }
 
-        // Extract from API response
-        function extractFromApiResponse(data) {
-            const vehicles = [];
-            try {
-                const listings = data?.listings || data?.searchResults?.listings || data?.vehicles || data?.results || [];
-                for (const item of listings) {
-                    vehicles.push(normalizeVehicle(item));
+        // Extract MobX state from HTML (server-rendered)
+        function extractMobxFromHtml(html) {
+            // Look for __MOBX_STATE__ in script tags
+            const mobxMatch = html.match(/window\.__MOBX_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/);
+            if (mobxMatch) {
+                try {
+                    const state = JSON.parse(mobxMatch[1]);
+                    const listings = state?.SearchRequestStore?.results?.listings ||
+                        state?.SearchRequestStore?.searchResults?.listings || [];
+                    return listings.map(normalizeVehicle);
+                } catch (e) {
+                    log.debug('Failed to parse MobX state from HTML');
                 }
-            } catch (e) {
-                log.debug('Failed to parse API response', { error: e.message });
             }
+            return [];
+        }
+
+        // Extract from JSON-LD
+        function extractJsonLd($) {
+            const vehicles = [];
+            $('script[type="application/ld+json"]').each((_, script) => {
+                try {
+                    const data = JSON.parse($(script).html());
+                    const items = data['@graph'] || [data];
+                    for (const item of items) {
+                        if (item['@type'] === 'Vehicle' || item['@type'] === 'Car') {
+                            vehicles.push({
+                                title: item.name || null,
+                                price: item.offers?.price || null,
+                                mileage: item.mileageFromOdometer || null,
+                                vin: item.vehicleIdentificationNumber || null,
+                                url: item.url || null,
+                                currency: item.offers?.priceCurrency || 'USD',
+                            });
+                        }
+                    }
+                } catch (e) { }
+            });
             return vehicles;
         }
 
-        const crawler = new PlaywrightCrawler({
-            launchContext: {
-                launcher: firefox,
-                launchOptions: {
-                    headless: true,
-                },
-            },
-            // Only use proxy if configured successfully
-            ...(proxyConf && { proxyConfiguration: proxyConf }),
-            maxConcurrency: 2,
-            maxRequestRetries: 3,
-            navigationTimeoutSecs: 60,
-            requestHandlerTimeoutSecs: 90,
+        // Extract from DOM
+        function extractFromDom($) {
+            const vehicles = [];
+            $('.srp-grid-list-item, div[id^="listing_"]').each((_, card) => {
+                const $card = $(card);
+                const title = $card.find('h3.srp-list-item-basic-info-model, h3').first().text().trim();
+                const url = $card.find('.srp-list-item__header a, header a').first().attr('href');
+                const priceText = $card.find('.srp-list-item__price, [class*="price"]').first().text().trim();
+                const infoText = $card.find('span.srp-grid-list-item__mileage-address').first().text().trim();
+
+                const price = priceText ? parseInt(priceText.replace(/[^0-9]/g, ''), 10) : null;
+                const [mileageStr] = infoText.split('|').map(s => s?.trim() || '');
+                const mileage = mileageStr ? parseInt(mileageStr.replace(/[^0-9]/g, ''), 10) : null;
+
+                if (title) {
+                    vehicles.push({ title, url, price, mileage, currency: 'USD' });
+                }
+            });
+            return vehicles;
+        }
+
+        // ============================================
+        // APPROACH 1: Try CheerioCrawler first (fast, cheap)
+        // ============================================
+        log.info('Attempting CheerioCrawler with fingerprint rotation...');
+
+        let cheerioSuccess = false;
+
+        const cheerioCrawler = new CheerioCrawler({
+            // Use got-scraping with browser-like fingerprints
             useSessionPool: true,
+            persistCookiesPerSession: true,
+            sessionPoolOptions: {
+                maxPoolSize: 10,
+            },
+            // No proxy for Cheerio - datacenter IPs get blocked
+            maxConcurrency: 1,
+            maxRequestRetries: 2,
+            requestHandlerTimeoutSecs: 60,
 
+            // Add browser-like headers
             preNavigationHooks: [
-                async ({ page }) => {
-                    // Reset intercepted data for each request
-                    interceptedApiData = [];
-
-                    // Intercept API responses
-                    page.on('response', async (response) => {
-                        const url = response.url();
-                        if (url.includes('/api/ubs/search') || url.includes('/api/') && url.includes('search')) {
-                            try {
-                                const contentType = response.headers()['content-type'] || '';
-                                if (contentType.includes('application/json')) {
-                                    const data = await response.json();
-                                    const vehicles = extractFromApiResponse(data);
-                                    if (vehicles.length > 0) {
-                                        log.info(`Intercepted ${vehicles.length} vehicles from API`);
-                                        interceptedApiData.push(...vehicles);
-                                    }
-                                }
-                            } catch (e) {
-                                // Ignore response parsing errors
-                            }
-                        }
-                    });
-
-                    // Block only heavy resources, keep essential ones
-                    await page.route('**/*', (route) => {
-                        const type = route.request().resourceType();
-                        const url = route.request().url();
-
-                        // Block analytics and ads
-                        if (url.includes('google-analytics') ||
-                            url.includes('googletagmanager') ||
-                            url.includes('facebook.net') ||
-                            url.includes('doubleclick') ||
-                            url.includes('hotjar')) {
-                            return route.abort();
-                        }
-
-                        // Block fonts and media
-                        if (['media', 'font'].includes(type)) {
-                            return route.abort();
-                        }
-
-                        return route.continue();
-                    });
+                async ({ request }) => {
+                    request.headers = {
+                        ...request.headers,
+                        'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache',
+                        'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                        'Sec-Ch-Ua-Mobile': '?0',
+                        'Sec-Ch-Ua-Platform': '"Windows"',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Upgrade-Insecure-Requests': '1',
+                    };
                 },
             ],
 
-            requestHandler: async ({ page, request }) => {
-                const pageNo = request.userData?.pageNo || 1;
-                log.info(`Processing page ${pageNo}: ${request.url}`);
+            async requestHandler({ $, request, body }) {
+                log.info(`CheerioCrawler processing: ${request.url}`);
 
-                // Wait for page to fully load
-                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-
-                // Small delay to ensure MobX state is populated
-                await page.waitForTimeout(2000);
-
+                const html = body.toString();
                 let vehicles = [];
                 let source = 'unknown';
 
-                // PRIORITY 1: Extract from MobX state (fastest & most reliable)
-                try {
-                    vehicles = await page.evaluate(() => {
-                        const mobxState = window.__MOBX_STATE__;
-                        if (!mobxState) return [];
+                // Check if we got blocked (DataDome/Captcha page)
+                if (html.includes('datadome') || html.includes('captcha') ||
+                    html.includes('Access Denied') || html.length < 5000) {
+                    log.warning('CheerioCrawler: Got blocked or captcha page');
+                    throw new Error('Blocked by anti-bot');
+                }
 
-                        // Try SearchRequestStore first
-                        const searchStore = mobxState.SearchRequestStore;
-                        if (searchStore?.results?.listings) {
-                            return searchStore.results.listings;
-                        }
+                // Try MobX extraction from server-rendered HTML
+                vehicles = extractMobxFromHtml(html);
+                if (vehicles.length > 0) {
+                    source = 'MobX-SSR';
+                    log.info(`Extracted ${vehicles.length} vehicles from server-rendered MobX`);
+                }
 
-                        // Alternative paths
-                        if (searchStore?.searchResults?.listings) {
-                            return searchStore.searchResults.listings;
-                        }
-
-                        // Search all stores for listings
-                        for (const key of Object.keys(mobxState)) {
-                            const store = mobxState[key];
-                            if (store?.results?.listings) return store.results.listings;
-                            if (store?.listings) return store.listings;
-                        }
-
-                        return [];
-                    });
-
+                // Try JSON-LD
+                if (vehicles.length === 0) {
+                    vehicles = extractJsonLd($);
                     if (vehicles.length > 0) {
-                        source = 'MobX';
-                        vehicles = vehicles.map(normalizeVehicle);
-                        log.info(`Extracted ${vehicles.length} vehicles from MobX state`);
-                    }
-                } catch (e) {
-                    log.debug('MobX extraction failed', { error: e.message });
-                }
-
-                // PRIORITY 2: Use intercepted API data
-                if (vehicles.length === 0 && interceptedApiData.length > 0) {
-                    vehicles = interceptedApiData;
-                    source = 'API';
-                    log.info(`Using ${vehicles.length} vehicles from intercepted API`);
-                }
-
-                // PRIORITY 3: Extract from JSON-LD (structured data)
-                if (vehicles.length === 0) {
-                    try {
-                        vehicles = await page.evaluate(() => {
-                            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-                            const results = [];
-
-                            for (const script of scripts) {
-                                try {
-                                    const data = JSON.parse(script.textContent);
-                                    const items = data['@graph'] || [data];
-
-                                    for (const item of items) {
-                                        if (item['@type'] === 'Vehicle' || item['@type'] === 'Car') {
-                                            results.push({
-                                                title: item.name || null,
-                                                price: item.offers?.price || null,
-                                                mileage: item.mileageFromOdometer || null,
-                                                vin: item.vehicleIdentificationNumber || null,
-                                                url: item.url || null,
-                                            });
-                                        }
-                                    }
-                                } catch (e) { }
-                            }
-                            return results;
-                        });
-
-                        if (vehicles.length > 0) {
-                            source = 'JSON-LD';
-                            log.info(`Extracted ${vehicles.length} vehicles from JSON-LD`);
-                        }
-                    } catch (e) {
-                        log.debug('JSON-LD extraction failed', { error: e.message });
+                        source = 'JSON-LD';
+                        log.info(`Extracted ${vehicles.length} vehicles from JSON-LD`);
                     }
                 }
 
-                // PRIORITY 4: DOM parsing (slowest, last resort)
+                // Try DOM parsing
                 if (vehicles.length === 0) {
-                    try {
-                        vehicles = await page.evaluate(() => {
-                            const cards = document.querySelectorAll('.srp-grid-list-item, div[id^="listing_"], [data-testid="listing-card"]');
-                            return Array.from(cards).map(card => {
-                                const titleEl = card.querySelector('h3.srp-list-item-basic-info-model, h3');
-                                const linkEl = card.querySelector('.srp-list-item__header a, header a');
-                                const priceEl = card.querySelector('.srp-list-item__price, [class*="price"]');
-                                const infoEl = card.querySelector('span.srp-grid-list-item__mileage-address');
-
-                                const infoText = infoEl ? infoEl.textContent.trim() : '';
-                                const [mileageStr] = infoText.split('|').map(s => s?.trim() || '');
-                                const mileage = mileageStr ? parseInt(mileageStr.replace(/[^0-9]/g, ''), 10) : null;
-
-                                const priceText = priceEl ? priceEl.textContent.trim() : '';
-                                const price = priceText ? parseInt(priceText.replace(/[^0-9]/g, ''), 10) : null;
-
-                                return {
-                                    title: titleEl ? titleEl.textContent.trim() : null,
-                                    price,
-                                    mileage,
-                                    url: linkEl ? linkEl.href : null,
-                                };
-                            }).filter(v => v.title);
-                        });
-
-                        if (vehicles.length > 0) {
-                            source = 'DOM';
-                            log.info(`Extracted ${vehicles.length} vehicles from DOM`);
-                        }
-                    } catch (e) {
-                        log.debug('DOM extraction failed', { error: e.message });
+                    vehicles = extractFromDom($);
+                    if (vehicles.length > 0) {
+                        source = 'DOM';
+                        log.info(`Extracted ${vehicles.length} vehicles from DOM`);
                     }
                 }
 
-                // No data found - debug
                 if (vehicles.length === 0) {
-                    log.warning('No vehicles found on page');
-
-                    // Save debug screenshot to KV store
-                    try {
-                        const kvStore = await Actor.openKeyValueStore();
-                        const screenshot = await page.screenshot({ fullPage: true });
-                        await kvStore.setValue(`debug-page-${pageNo}-${Date.now()}`, screenshot, { contentType: 'image/png' });
-                        log.info('Debug screenshot saved to key-value store');
-                    } catch (e) { }
-
-                    return;
+                    log.warning('CheerioCrawler: No vehicles found, will try Playwright');
+                    throw new Error('No vehicles found');
                 }
 
-                log.info(`Found ${vehicles.length} vehicles (source: ${source})`);
+                cheerioSuccess = true;
 
-                // Save vehicles up to results_wanted
+                // Save vehicles
                 const remaining = RESULTS_WANTED - saved;
                 const toSave = vehicles.slice(0, Math.max(0, remaining));
 
                 for (const vehicle of toSave) {
                     await Dataset.pushData({
                         ...vehicle,
-                        currency: vehicle.currency || 'USD',
                         scraped_at: new Date().toISOString(),
                         source: 'carfax.com',
                         extraction_method: source,
                     });
                     saved++;
-
                     if (saved >= RESULTS_WANTED) break;
                 }
 
-                log.info(`Saved ${saved}/${RESULTS_WANTED} vehicles`);
-
-                // Handle pagination if more results needed
-                if (saved < RESULTS_WANTED && pageNo < MAX_PAGES) {
-                    const hasNextButton = await page.evaluate(() => {
-                        const nextBtn = document.querySelector('button.pagination_pages_nav:not([disabled])');
-                        return nextBtn && nextBtn.textContent.includes('Next');
-                    });
-
-                    if (hasNextButton) {
-                        await page.click('button.pagination_pages_nav:last-of-type');
-                        await page.waitForTimeout(2000);
-                        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-
-                        // Process next page inline
-                        let currentPage = pageNo + 1;
-
-                        while (saved < RESULTS_WANTED && currentPage <= MAX_PAGES) {
-                            await page.waitForTimeout(1500);
-
-                            // Extract from next page
-                            let nextVehicles = await page.evaluate(() => {
-                                const mobxState = window.__MOBX_STATE__;
-                                if (mobxState?.SearchRequestStore?.results?.listings) {
-                                    return mobxState.SearchRequestStore.results.listings;
-                                }
-                                return [];
-                            });
-
-                            if (nextVehicles.length > 0) {
-                                nextVehicles = nextVehicles.map(normalizeVehicle);
-                            } else if (interceptedApiData.length > 0) {
-                                nextVehicles = interceptedApiData;
-                            }
-
-                            if (nextVehicles.length === 0) {
-                                log.info('No more vehicles found, stopping pagination');
-                                break;
-                            }
-
-                            log.info(`Page ${currentPage}: Found ${nextVehicles.length} vehicles`);
-
-                            const pageRemaining = RESULTS_WANTED - saved;
-                            const pageToSave = nextVehicles.slice(0, Math.max(0, pageRemaining));
-
-                            for (const vehicle of pageToSave) {
-                                await Dataset.pushData({
-                                    ...vehicle,
-                                    currency: vehicle.currency || 'USD',
-                                    scraped_at: new Date().toISOString(),
-                                    source: 'carfax.com',
-                                    extraction_method: source,
-                                });
-                                saved++;
-
-                                if (saved >= RESULTS_WANTED) break;
-                            }
-
-                            log.info(`Saved ${saved}/${RESULTS_WANTED} vehicles`);
-
-                            // Check for next page
-                            const canContinue = await page.evaluate(() => {
-                                const nextBtn = document.querySelector('button.pagination_pages_nav:not([disabled])');
-                                return nextBtn && nextBtn.textContent.includes('Next');
-                            });
-
-                            if (!canContinue || saved >= RESULTS_WANTED) break;
-
-                            await page.click('button.pagination_pages_nav:last-of-type');
-                            await page.waitForTimeout(2000);
-                            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-                            currentPage++;
-                        }
-                    }
-                }
+                log.info(`CheerioCrawler: Saved ${saved}/${RESULTS_WANTED} vehicles`);
             },
 
-            failedRequestHandler: async ({ request }, error) => {
-                const errorMsg = error.message || '';
-
-                if (errorMsg.includes('NS_ERROR_PROXY_CONNECTION_REFUSED')) {
-                    log.error(`Proxy connection refused for ${request.url}. Try running without proxy or check proxy configuration.`);
-                } else if (errorMsg.includes('403')) {
-                    log.warning(`Blocked (403): ${request.url}`);
-                } else {
-                    log.error(`Failed: ${request.url}`, { error: errorMsg });
-                }
+            async failedRequestHandler({ request }, error) {
+                log.warning(`CheerioCrawler failed: ${error.message}`);
             },
         });
 
-        await crawler.run(initial.map(u => ({ url: u, userData: { pageNo: 1 } })));
-        log.info(`Finished. Saved ${saved} vehicles total.`);
+        try {
+            await cheerioCrawler.run(initial.map(u => ({ url: u, userData: { pageNo: 1 } })));
+        } catch (e) {
+            log.warning(`CheerioCrawler error: ${e.message}`);
+        }
+
+        // ============================================
+        // APPROACH 2: Playwright fallback (if needed)
+        // ============================================
+        if (saved < RESULTS_WANTED && (!cheerioSuccess || use_browser)) {
+            log.info('Falling back to PlaywrightCrawler...');
+
+            const playwrightCrawler = new PlaywrightCrawler({
+                launchContext: {
+                    launcher: firefox,
+                    launchOptions: {
+                        headless: true,
+                        args: ['--disable-blink-features=AutomationControlled'],
+                    },
+                },
+                // Only use proxy if configured (residential recommended)
+                ...(proxyConf && { proxyConfiguration: proxyConf }),
+                maxConcurrency: 1,
+                maxRequestRetries: 3,
+                navigationTimeoutSecs: 90,
+                requestHandlerTimeoutSecs: 120,
+                useSessionPool: true,
+
+                preNavigationHooks: [
+                    async ({ page }) => {
+                        // Anti-detection
+                        await page.addInitScript(() => {
+                            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                            Object.defineProperty(navigator, 'plugins', {
+                                get: () => [{ name: 'Chrome PDF Plugin' }, { name: 'Native Client' }],
+                            });
+                            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                            window.chrome = { runtime: {} };
+                        });
+
+                        // Block trackers
+                        await page.route('**/*', (route) => {
+                            const url = route.request().url();
+                            if (url.includes('google-analytics') || url.includes('googletagmanager') ||
+                                url.includes('facebook.net') || url.includes('doubleclick')) {
+                                return route.abort();
+                            }
+                            return route.continue();
+                        });
+                    },
+                ],
+
+                async requestHandler({ page, request }) {
+                    log.info(`PlaywrightCrawler processing: ${request.url}`);
+
+                    // Wait for page load
+                    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                    await page.waitForTimeout(3000);
+
+                    let vehicles = [];
+                    let source = 'unknown';
+
+                    // Try MobX extraction
+                    try {
+                        vehicles = await page.evaluate(() => {
+                            const state = window.__MOBX_STATE__;
+                            if (!state) return [];
+                            const listings = state.SearchRequestStore?.results?.listings || [];
+                            return listings;
+                        });
+
+                        if (vehicles.length > 0) {
+                            source = 'MobX';
+                            vehicles = vehicles.map(normalizeVehicle);
+                            log.info(`Extracted ${vehicles.length} vehicles from MobX`);
+                        }
+                    } catch (e) {
+                        log.debug('MobX extraction failed');
+                    }
+
+                    // DOM fallback
+                    if (vehicles.length === 0) {
+                        vehicles = await page.evaluate(() => {
+                            return Array.from(document.querySelectorAll('.srp-grid-list-item, div[id^="listing_"]'))
+                                .map(card => ({
+                                    title: card.querySelector('h3')?.textContent?.trim() || null,
+                                    url: card.querySelector('header a')?.href || null,
+                                    price: parseInt(card.querySelector('[class*="price"]')?.textContent?.replace(/[^0-9]/g, '') || '0', 10) || null,
+                                }))
+                                .filter(v => v.title);
+                        });
+                        if (vehicles.length > 0) {
+                            source = 'DOM';
+                            log.info(`Extracted ${vehicles.length} vehicles from DOM`);
+                        }
+                    }
+
+                    if (vehicles.length === 0) {
+                        // Debug screenshot
+                        const kvStore = await Actor.openKeyValueStore();
+                        const screenshot = await page.screenshot({ fullPage: true });
+                        await kvStore.setValue(`debug-${Date.now()}`, screenshot, { contentType: 'image/png' });
+                        log.warning('No vehicles found, debug screenshot saved');
+                        return;
+                    }
+
+                    // Save vehicles
+                    const remaining = RESULTS_WANTED - saved;
+                    const toSave = vehicles.slice(0, Math.max(0, remaining));
+
+                    for (const vehicle of toSave) {
+                        await Dataset.pushData({
+                            ...vehicle,
+                            currency: 'USD',
+                            scraped_at: new Date().toISOString(),
+                            source: 'carfax.com',
+                            extraction_method: source,
+                        });
+                        saved++;
+                        if (saved >= RESULTS_WANTED) break;
+                    }
+
+                    log.info(`PlaywrightCrawler: Saved ${saved}/${RESULTS_WANTED} vehicles`);
+
+                    // Handle pagination
+                    while (saved < RESULTS_WANTED) {
+                        const hasNext = await page.evaluate(() => {
+                            const btn = document.querySelector('button.pagination_pages_nav:not([disabled])');
+                            return btn?.textContent?.includes('Next');
+                        });
+
+                        if (!hasNext) break;
+
+                        await page.click('button.pagination_pages_nav:last-of-type');
+                        await page.waitForTimeout(3000);
+                        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+                        const nextVehicles = await page.evaluate(() => {
+                            const state = window.__MOBX_STATE__;
+                            return state?.SearchRequestStore?.results?.listings || [];
+                        });
+
+                        if (nextVehicles.length === 0) break;
+
+                        const remaining = RESULTS_WANTED - saved;
+                        const toSave = nextVehicles.slice(0, remaining).map(normalizeVehicle);
+
+                        for (const vehicle of toSave) {
+                            await Dataset.pushData({
+                                ...vehicle,
+                                scraped_at: new Date().toISOString(),
+                                source: 'carfax.com',
+                                extraction_method: 'MobX',
+                            });
+                            saved++;
+                            if (saved >= RESULTS_WANTED) break;
+                        }
+
+                        log.info(`Pagination: Saved ${saved}/${RESULTS_WANTED} vehicles`);
+                    }
+                },
+
+                async failedRequestHandler({ request }, error) {
+                    log.error(`PlaywrightCrawler failed: ${request.url}`, { error: error.message });
+                },
+            });
+
+            await playwrightCrawler.run(initial.map(u => ({ url: u, userData: { pageNo: 1 } })));
+        }
+
+        log.info(`Finished. Total saved: ${saved} vehicles`);
 
     } finally {
         await Actor.exit();
