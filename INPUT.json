@@ -1,4 +1,9 @@
 {
   "startUrl": "https://www.carfax.com/Used-Pickups_bt6",
-  "results_wanted": 20
+  "results_wanted": 20,
+  "requestTransport": "auto",
+  "headerProfile": "auto",
+  "useBrowserFallback": true,
+  "requestTimeoutSecs": 45,
+  "requestDelayMillis": 350
 }

@@ -5,14 +5,13 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "start": "node src/main.js",
-    "postinstall": "npx camoufox-js fetch"
+    "start": "node src/main.js"
   },
   "dependencies": {
-    "@crawlee/playwright": "^3.15.3",
-    "apify": "^3.5.2",
-    "camoufox-js": "^0.7.0",
-    "playwright": "1.56.1"
+    "@crawlee/playwright": "^3.16.0",
+    "apify": "^3.7.0",
+    "got-scraping": "^4.1.2",
+    "playwright": "1.59.1"
   },
   "author": "Shahid Irfan",
   "license": "ISC"

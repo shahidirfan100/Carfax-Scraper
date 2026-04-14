@@ -1,5 +1,5 @@
-# Use the official Camoufox base image for anti-bot bypass
-FROM apify/actor-node-playwright-camoufox:22-1.56.1
+# Use the official Playwright Firefox base image
+FROM apify/actor-node-playwright-firefox:24-1.59.1
 
 # Standard setup
 RUN npm ls @crawlee/core apify playwright
