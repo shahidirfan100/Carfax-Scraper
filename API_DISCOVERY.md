@@ -1,5 +1,27 @@
 ## API Discovery
 
+### Current evidence and recovery contract (2026-10-09)
+
+Read this file before every failure investigation. The older discovery notes below are historical, not proof of current target access.
+
+- Baseline: local `got-scraping` with Chrome headers returned HTTP 403 for `https://www.carfax.com/Used-Pickups_bt6`. The old actor exited 0 with zero records. This is a failure, not a successful QA run.
+- Impit 0.14.5: all 23 supported profiles were enumerated from the installed `Browser` type and tested against that same category URL without a proxy on 2026-10-09. Every profile returned HTTP 403 with zero vehicle records, so the local network is IP-blocked and the TLS profile alone is not the deciding factor here. Set `CARFAX_PROBE_PROXY_URL` to rerun the full matrix through a proxy, and `CARFAX_PROBE_PROFILES` to recheck one profile. The JSON matrix is in local `qa-artifacts/impit-profiles.json`; rerun `npm run probe:profiles` to refresh it.
+- Listing API verified on 2026-10-09: `GET https://helix.carfax.com/search/v2/vehicles` returns JSON vehicle records over plain HTTP and supports `make`, `model`, `zip`, `yearMin`, `yearMax`, `priceMin`, `priceMax`, `mileageMax`, `vehicleCondition=USED`, `sort=BEST`, `rows` (100 works) and `page` (page 2 returns different VINs). This is the primary listing source for make/model/filter searches and satisfies large `results_wanted` limits without a browser. The `{vin}` path form remains the per-vehicle detail reference. Aggregates/recommendations live on `helix.carfax.com/rnr/api/vehicles/v3/aggregates/get/by/key` and the page recipe on `helix.carfax.com/recipe/v2/onPage/{slug}`; these are not required for listing extraction.
+- Runtime HTTP uses Impit's own profile headers and a cookie jar per profile/proxy identity. Endpoint origin/referer and caller headers are preserved. The automatic rotation is derived at runtime from the installed impit release, ordered as newest Chrome then newest Firefox, and de-duplicated to at most four fingerprints. A blocked fingerprint is retired and replaced by the next one, so a profile that starts failing is dropped without a code change. Mobile aliases map to `ios18` and `okhttp4` only when selected explicitly.
+- Network failures, HTTP 429 and 5xx get at most three attempts. Retry-After is capped at ten seconds. Permanent 4xx are not retried. Blocks retire the profile/session before the next strategy.
+- The browser fallback was removed on 2026-10-09 once HTTP-only extraction was verified for all search modes. The actor is HTTP-only (impit); no Playwright or Patchright dependency remains, and the base image is the lightweight `apify/actor-node`. Category and other `www.carfax.com` URLs yield the server-rendered first page; make/model/location/filter searches page the listing API up to `results_wanted`.
+- HTTP keeps one cookie jar per profile/proxy identity. Residential sessions rotate per attempt; Unblocker receives no session ID and HTTP cookie persistence is disabled for that group. The caller's selected proxy object is passed to Apify unchanged; groups are never silently escalated.
+- Zero vehicle records cause a nonzero exit. Non-empty batches are saved immediately. When fewer than `results_wanted` are collected, the actor logs a warning rather than failing. The record mapper and dataset field names are preserved; filter metadata without a VIN or vehicle URL/title is rejected.
+- Ten local recovery/input/output tests pass. These checks do not establish live Carfax access on their own.
+- Proxy matrix verified on 2026-10-09 (actor `just_martin/carfax-scraper-resilience-qa`): the listing/search API and category SSR extraction both return 200 with **no proxy**, RESIDENTIAL, and UNBLOCKER. Browser-based recovery is only verified with UNBLOCKER; without a proxy or with RESIDENTIAL the browser receives a DataDome challenge. Because HTTP extraction covers normal runs, the proxy is now disabled by default and enabled by user choice.
+- Cloud verification on 2026-10-09 (actor `just_martin/carfax-scraper-resilience-qa`, Apify Proxy RESIDENTIAL):
+  - HTTP profiles: `chrome` reached 200 on one run and 403 on a later run; `chrome151`, `mobile_web` (`ios18`) and `mobile_app` (`okhttp4`) reached 200; `firefox` returned 403. The automatic rotation handled the flaky `chrome` block by retiring it and succeeding on `chrome151` in the same run (20/20 records).
+  - A browser fallback (since removed) was challenged by DataDome with RESIDENTIAL; with UNBLOCKER it worked only after scoping a TLS exception to that group. HTTP-only extraction does not need that path.
+  - Default prefilled run (startUrl `Used-Pickups_bt6`, `results_wanted` 20) finished Succeeded with a non-empty dataset in about two seconds.
+  - HTTP-only verification on 2026-10-09: make/model search paged the listing API to 200/200 in about five seconds with no proxy; location and filter searches returned the requested records.
+
+Acceptance: lint and schema validation, bounded recovery tests, exact result limits/deduplication, URL/filter/VIN/default isolation, and a fresh cloud run with real non-empty output. Passing the first checks alone does not establish Apify Store QA success.
+
 ### 1. Existing actor audit
 Current actor (`src/main.js`) extracted vehicle data mainly from in-page MobX state (`window.__MOBX_STATE__`) and DOM fallback.
 

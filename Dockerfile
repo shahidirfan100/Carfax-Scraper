@@ -1,24 +1,9 @@
-# Use the official Playwright Firefox base image
-FROM apify/actor-node-playwright-firefox:24-1.59.1
+FROM apify/actor-node:22
 
-# Standard setup
-RUN npm ls @crawlee/core apify playwright
-
-COPY --chown=myuser:myuser package*.json Dockerfile ./
-
-# Ensure Playwright version matches
-RUN node check-playwright-version.mjs
-
+COPY --chown=myuser:myuser package*.json ./
 RUN npm --quiet set progress=false \
-    && npm install --omit=dev \
-    && echo "Installed NPM packages:" \
-    && (npm list --omit=dev --all || true) \
-    && echo "Node.js version:" \
-    && node --version \
-    && echo "NPM version:" \
-    && npm --version \
-    && rm -r ~/.npm
+    && npm install --omit=dev --no-audit --no-fund \
+    && node -e "import('impit').then(() => console.log('impit native import OK'))"
 
 COPY --chown=myuser:myuser . ./
-
 CMD ["node", "src/main.js"]

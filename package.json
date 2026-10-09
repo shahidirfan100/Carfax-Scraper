@@ -5,14 +5,22 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "start": "node src/main.js"
+    "start": "node src/main.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "node --test test/*.test.js",
+    "probe:profiles": "node scripts/probe-profiles.js"
   },
   "dependencies": {
-    "@crawlee/playwright": "^3.16.0",
     "apify": "^3.7.0",
-    "got-scraping": "^4.1.2",
-    "playwright": "1.59.1"
+    "impit": "^0.14.5",
+    "tough-cookie": "^6.0.2"
   },
   "author": "Shahid Irfan",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "@apify/eslint-config": "^2.0.6",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8"
+  }
 }

@@ -10,8 +10,22 @@
           "price",
           "mileage",
           "vin",
-          "location",
-          "damage_report",
+          "year",
+          "make",
+          "model",
+          "trim",
+          "exterior_color",
+          "drivetype",
+          "transmission",
+          "engine",
+          "dealer_name",
+          "dealer_city",
+          "dealer_state",
+          "badge",
+          "no_accidents",
+          "one_owner",
+          "service_records",
+          "image_url",
           "url"
         ]
       },
@@ -24,26 +38,82 @@
           },
           "price": {
             "label": "Price",
-            "format": "text"
+            "format": "number"
           },
           "mileage": {
             "label": "Mileage",
-            "format": "text"
+            "format": "number"
           },
           "vin": {
             "label": "VIN",
             "format": "text"
           },
-          "location": {
-            "label": "Location",
+          "year": {
+            "label": "Year",
+            "format": "number"
+          },
+          "make": {
+            "label": "Make",
             "format": "text"
           },
-          "damage_report": {
-            "label": "Damage Report",
+          "model": {
+            "label": "Model",
             "format": "text"
+          },
+          "trim": {
+            "label": "Trim",
+            "format": "text"
+          },
+          "exterior_color": {
+            "label": "Color",
+            "format": "text"
+          },
+          "drivetype": {
+            "label": "Drive",
+            "format": "text"
+          },
+          "transmission": {
+            "label": "Transmission",
+            "format": "text"
+          },
+          "engine": {
+            "label": "Engine",
+            "format": "text"
+          },
+          "dealer_name": {
+            "label": "Dealer",
+            "format": "text"
+          },
+          "dealer_city": {
+            "label": "Dealer City",
+            "format": "text"
+          },
+          "dealer_state": {
+            "label": "Dealer State",
+            "format": "text"
+          },
+          "badge": {
+            "label": "Deal",
+            "format": "text"
+          },
+          "no_accidents": {
+            "label": "No Accidents",
+            "format": "boolean"
+          },
+          "one_owner": {
+            "label": "One Owner",
+            "format": "boolean"
+          },
+          "service_records": {
+            "label": "Service Records",
+            "format": "boolean"
+          },
+          "image_url": {
+            "label": "Image",
+            "format": "image"
           },
           "url": {
-            "label": "URL",
+            "label": "Listing",
             "format": "link"
           }
         }

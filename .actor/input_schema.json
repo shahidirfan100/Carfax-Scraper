@@ -1,20 +1,21 @@
 {
   "title": "Carfax Used Cars Scraper",
-  "description": "Scrape used car listings from Carfax.com. Provide a start URL or use filters like make, model, price range, and mileage. Extracts detailed vehicle information including VIN, price, mileage, and Carfax reports.",
+  "description": "Collect used Carfax vehicles by search URL, make/model, or filters. Output is saved in batches.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrl": {
       "title": "Start URL",
       "type": "string",
-      "description": "Start scraping from a specific Carfax search URL. If provided, this will be used instead of filters.",
+      "description": "Carfax search URL. A custom URL overrides filters. When the URL equals the default example, supplied filters take priority.",
       "editor": "textfield",
-      "prefill": "https://www.carfax.com/Used-Pickups_bt6"
+      "prefill": "https://www.carfax.com/Used-Pickups_bt6",
+      "default": "https://www.carfax.com/Used-Pickups_bt6"
     },
-    "vin": {
-      "title": "VIN",
+    "location": {
+      "title": "Location",
       "type": "string",
-      "description": "Optional VIN for direct detail lookup. When set, the actor will try the Helix detail endpoint for that vehicle.",
+      "description": "ZIP code or location to search near. Used with make/model filters.",
       "editor": "textfield"
     },
     "make": {
@@ -62,12 +63,6 @@
       "editor": "number",
       "minimum": 0
     },
-    "location": {
-      "title": "Location",
-      "type": "string",
-      "description": "Location or ZIP code to search near.",
-      "editor": "textfield"
-    },
     "results_wanted": {
       "title": "Maximum number of vehicles",
       "type": "integer",
@@ -84,121 +79,13 @@
       "editor": "number",
       "default": 10
     },
-    "requestTransport": {
-      "title": "Request transport",
-      "type": "string",
-      "description": "Choose how requests are sent. Auto prefers custom request API locally when configured, Apify Proxy HTTP on cloud, then browser fallback if enabled.",
-      "default": "auto",
-      "editor": "select",
-      "enum": [
-        "auto",
-        "direct_http",
-        "apify_proxy_http",
-        "custom_request_api",
-        "browser_firefox"
-      ],
-      "enumTitles": [
-        "Auto",
-        "Direct HTTP",
-        "Apify Proxy HTTP",
-        "Custom Request API",
-        "Browser Firefox Only"
-      ]
-    },
-    "headerProfile": {
-      "title": "Header profile",
-      "type": "string",
-      "description": "Header set to try for HTTP requests. Auto rotates Firefox, Chrome, mobile web, and mobile app style headers.",
-      "default": "auto",
-      "editor": "select",
-      "enum": [
-        "auto",
-        "firefox",
-        "chrome",
-        "mobile_web",
-        "mobile_app"
-      ],
-      "enumTitles": [
-        "Auto",
-        "Firefox",
-        "Chrome",
-        "Mobile Web",
-        "Mobile App"
-      ]
-    },
-    "customHeadersJson": {
-      "title": "Custom headers JSON",
-      "type": "string",
-      "description": "Optional JSON object merged into request headers, for example {\"Authorization\":\"Bearer ...\"}.",
-      "editor": "textfield"
-    },
-    "requestApiUrlTemplate": {
-      "title": "Custom request API URL",
-      "type": "string",
-      "description": "Optional external request API endpoint for local or cloud runs. Use {url} placeholder or the actor will append the target URL as a query/body parameter.",
-      "editor": "textfield"
-    },
-    "requestApiMethod": {
-      "title": "Custom request API method",
-      "type": "string",
-      "description": "HTTP method used when calling the custom request API.",
-      "default": "GET",
-      "editor": "select",
-      "enum": [
-        "GET",
-        "POST"
-      ],
-      "enumTitles": [
-        "GET",
-        "POST"
-      ]
-    },
-    "requestApiUrlParam": {
-      "title": "Custom request API URL parameter",
-      "type": "string",
-      "description": "Parameter name used when the custom request API expects the target URL as a query or POST JSON field.",
-      "default": "url",
-      "editor": "textfield"
-    },
-    "requestApiHeadersJson": {
-      "title": "Custom request API headers JSON",
-      "type": "string",
-      "description": "Optional JSON object used as headers for the custom request API itself.",
-      "editor": "textfield"
-    },
-    "useBrowserFallback": {
-      "title": "Use browser fallback",
-      "type": "boolean",
-      "description": "If enabled, the actor falls back to Playwright Firefox when HTTP and custom API strategies do not return vehicle data.",
-      "default": true,
-      "editor": "checkbox"
-    },
-    "requestTimeoutSecs": {
-      "title": "Request timeout seconds",
-      "type": "integer",
-      "description": "Per-request timeout for HTTP and custom request API calls.",
-      "default": 45,
-      "minimum": 5,
-      "editor": "number"
-    },
-    "requestDelayMillis": {
-      "title": "Request delay milliseconds",
-      "type": "integer",
-      "description": "Delay between HTTP detail requests to reduce rate limiting.",
-      "default": 350,
-      "minimum": 0,
-      "editor": "number"
-    },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Use Apify Proxy (residential recommended for Carfax).",
+      "description": "No proxy is used by default. Enable Apify Proxy when you need it; Unblocker is the most reliable option and is required for browser-based recovery.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ]
+        "useApifyProxy": false
       }
     }
   },

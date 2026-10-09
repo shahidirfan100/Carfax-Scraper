@@ -1,20 +1,11 @@
+import { pathToFileURL } from 'node:url';
+
 import { Actor, log } from 'apify';
-import { gotScraping } from 'got-scraping';
-import { readFile } from 'node:fs/promises';
-import { firefox } from 'playwright';
 
-await Actor.init();
+import { DEFAULT_START_URL, fetchWithRecovery, getHeaderProfiles, HttpSessions, isBlocked, readDiscovery, validateTarget } from './transport.js';
 
-const LISTING_HINT_KEYS = ['vin', 'listPrice', 'currentPrice', 'vehicleUrl', 'make', 'model', 'year'];
 const CARFAX_REFERRER = 'https://www.carfax.com/cars-for-sale';
 const IS_AT_HOME = process.env.APIFY_IS_AT_HOME === '1';
-
-const USER_AGENTS = {
-    firefox: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
-    chrome: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-    mobile_web: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1',
-    mobile_app: 'CARFAX/6.65.0 okhttp/4.12.0 Android/14',
-};
 
 const isBlank = (value) => value === null || value === undefined || value === '';
 const safeJsonParse = (value) => {
@@ -25,84 +16,86 @@ const safeJsonParse = (value) => {
     }
 };
 
-const sleep = (millis) => new Promise((resolve) => setTimeout(resolve, millis));
+const sleep = (millis) => new Promise((resolve) => { setTimeout(resolve, millis); });
+
+// Keep failure diagnostics useful without leaking proxy credentials.
+function safeError(error) {
+    const name = error?.name || 'Error';
+    const message = String(error?.message || 'no message')
+        .replace(/\/\/[^@/]+@/g, '//***@')
+        .replace(/https?:\/\/\S+/g, '[url]')
+        .replace(/\s+/g, ' ');
+    return `${name}: ${message}`.slice(0, 300);
+}
 
 function parseJsonObjectInput(value, fallback = {}) {
     if (!value) return fallback;
     if (typeof value === 'object' && !Array.isArray(value)) return value;
-    if (typeof value !== 'string') return fallback;
+    if (typeof value !== 'string') throw new Error('Header configuration must be a JSON object');
 
     const parsed = safeJsonParse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Header configuration must be a JSON object');
+    return parsed;
 }
 
 function normalizeVin(value) {
     if (!value) return undefined;
     const upper = String(value).toUpperCase().trim();
-    return upper.length === 17 ? upper : undefined;
+    return /^[A-HJ-NPR-Z0-9]{17}$/.test(upper) ? upper : undefined;
 }
 
 function buildHelixVehicleUrl(vin) {
     return `https://helix.carfax.com/search/v2/vehicles/${vin}`;
 }
 
-function getHeaderProfiles(profile) {
-    if (!profile || profile === 'auto') return ['firefox', 'chrome', 'mobile_web', 'mobile_app'];
-    return [profile];
+const SEARCH_API_PATH = '/search/v2/vehicles';
+
+// The listing JSON API accepts make/model/location filters and pages with `page`.
+function isSearchApiUrl(value) {
+    try {
+        const url = new URL(value);
+        return url.hostname === 'helix.carfax.com' && url.pathname === SEARCH_API_PATH;
+    } catch {
+        return false;
+    }
 }
 
-function buildHeaders(profileName, targetUrl, customHeaders = {}) {
-    const isJsonTarget = /helix\.carfax\.com|\/search\/v2/i.test(targetUrl);
-
-    const shared = {
-        Accept: isJsonTarget ? 'application/json, text/plain, */*' : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: CARFAX_REFERRER,
-        Origin: 'https://www.carfax.com',
-    };
-
-    const profileHeaders = {
-        firefox: {
-            ...shared,
-            'User-Agent': USER_AGENTS.firefox,
-        },
-        chrome: {
-            ...shared,
-            'User-Agent': USER_AGENTS.chrome,
-            'sec-ch-ua': '"Chromium";v="147", "Google Chrome";v="147", "Not-A.Brand";v="24"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-site': isJsonTarget ? 'same-site' : 'none',
-            'sec-fetch-mode': isJsonTarget ? 'cors' : 'navigate',
-            'sec-fetch-dest': isJsonTarget ? 'empty' : 'document',
-        },
-        mobile_web: {
-            ...shared,
-            'User-Agent': USER_AGENTS.mobile_web,
-        },
-        mobile_app: {
-            Accept: 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'User-Agent': USER_AGENTS.mobile_app,
-            'X-Requested-With': 'com.carfax.consumer',
-        },
-    };
-
-    return {
-        ...(profileHeaders[profileName] || profileHeaders.firefox),
-        ...customHeaders,
-    };
+function withPage(url, page) {
+    const parsed = new URL(url);
+    parsed.searchParams.set('page', String(page));
+    return parsed.toString();
 }
 
-function responseLooksBlocked(statusCode, text = '') {
-    if (statusCode === 403 || statusCode === 429) return true;
-    return /request blocked|datadome|captcha|cloudfront|interstitial/i.test(text);
+function buildSearchApiUrl(filters) {
+    const params = new URLSearchParams();
+    if (filters.make) params.set('make', String(filters.make).trim());
+    if (filters.model) params.set('model', String(filters.model).trim());
+    if (filters.location) params.set('zip', String(filters.location).trim());
+    if (filters.year_min) params.set('yearMin', filters.year_min);
+    if (filters.year_max) params.set('yearMax', filters.year_max);
+    if (filters.price_min !== undefined) params.set('priceMin', filters.price_min);
+    if (filters.price_max !== undefined) params.set('priceMax', filters.price_max);
+    if (filters.mileage_max !== undefined) params.set('mileageMax', filters.mileage_max);
+    params.set('vehicleCondition', 'USED');
+    params.set('rows', '100');
+    params.set('sort', 'BEST');
+    params.set('page', '1');
+    return `https://helix.carfax.com${SEARCH_API_PATH}?${params}`;
+}
+
+function buildHeaders(targetUrl, customHeaders = {}) {
+    const headers = new Headers(customHeaders);
+    if (new URL(targetUrl).hostname === 'helix.carfax.com') {
+        if (!headers.has('origin')) headers.set('origin', 'https://www.carfax.com');
+        if (!headers.has('referer')) headers.set('referer', CARFAX_REFERRER);
+    }
+    return Object.fromEntries(headers);
 }
 
 function unwrapResponsePayload(bodyText, headers) {
     const contentType = String(headers['content-type'] || '').toLowerCase();
 
-    if (contentType.includes('json') || /^[\[{]/.test(bodyText.trim())) {
+    if (contentType.includes('json') || /^[{[]/.test(bodyText.trim())) {
         const parsed = safeJsonParse(bodyText);
         if (parsed !== undefined) {
             if (parsed && typeof parsed === 'object') {
@@ -232,7 +225,8 @@ function cleanValue(value) {
 
 function looksLikeVehicle(item) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
-    return LISTING_HINT_KEYS.some((key) => key in item);
+    return Boolean(normalizeVin(item.vin) || ((item.vehicleUrl || item.url)
+        && (item.title || item.vehicleTitle || (item.make && item.model))));
 }
 
 function collectVehicleCandidates(payload) {
@@ -331,26 +325,20 @@ function getUniqueKey(record) {
     return record?.vin || record?.url || `${record?.title || ''}|${record?.dealer_name || ''}|${record?.price || ''}`;
 }
 
-function isHelixResponse(url, contentType) {
-    if (!url.includes('helix.carfax.com')) return false;
-    if (!url.includes('/search/v2')) return false;
-    return contentType.includes('json');
-}
-
 async function pushUniqueRecords(records, state, tag) {
     const batch = [];
-
+    const keys = new Set();
     for (const record of records) {
-        if (state.saved >= state.resultsWanted) break;
+        if (state.saved + batch.length >= state.resultsWanted) break;
         const key = getUniqueKey(record);
-        if (!key || state.seenKeys.has(key)) continue;
-        state.seenKeys.add(key);
+        if (!key || state.seenKeys.has(key) || keys.has(key)) continue;
+        keys.add(key);
         batch.push(record);
-        state.saved++;
     }
-
     if (batch.length) {
         await Actor.pushData(batch);
+        for (const key of keys) state.seenKeys.add(key);
+        Object.assign(state, { saved: state.saved + batch.length });
         log.info(`Saved ${batch.length} records from ${tag}. Total: ${state.saved}/${state.resultsWanted}`);
     }
 }
@@ -387,61 +375,45 @@ function collectRecordsAndTargets(payload, extractionMethod) {
     return { records, detailTargets };
 }
 
+// Transport, profile rotation, timeouts and pacing are internal defaults so the
+// actor needs no transport tuning input. The only override is an optional relay
+// URL via environment, for developer testing where direct access is blocked.
 function resolveTransportConfig(input) {
     const envRequestApiUrl = process.env.CARFAX_REQUEST_API_URL?.trim();
     const envRequestApiHeaders = process.env.CARFAX_REQUEST_API_HEADERS?.trim();
     const envCustomHeaders = process.env.CARFAX_CUSTOM_HEADERS_JSON?.trim();
 
-    let requestTransport = input.requestTransport || 'auto';
-    const requestApiUrlTemplate = input.requestApiUrlTemplate?.trim() || (!IS_AT_HOME ? envRequestApiUrl : '');
-
-    if (requestTransport === 'auto') {
-        if (!IS_AT_HOME && requestApiUrlTemplate) {
-            requestTransport = 'custom_request_api';
-        } else if (IS_AT_HOME) {
-            requestTransport = 'apify_proxy_http';
-        } else {
-            requestTransport = 'direct_http';
-        }
+    const requestApiUrlTemplate = (!IS_AT_HOME && envRequestApiUrl) || '';
+    let requestTransport = 'direct_http';
+    if (requestApiUrlTemplate) {
+        requestTransport = 'custom_request_api';
+    } else if (IS_AT_HOME && input.proxyConfiguration?.useApifyProxy !== false) {
+        requestTransport = 'apify_proxy_http';
     }
 
     return {
         requestTransport,
-        headerProfiles: getHeaderProfiles(input.headerProfile || 'auto'),
-        customHeaders: parseJsonObjectInput(input.customHeadersJson || envCustomHeaders, {}),
+        headerProfiles: getHeaderProfiles('auto'),
+        customHeaders: parseJsonObjectInput(envCustomHeaders, {}),
         requestApiUrlTemplate,
-        requestApiMethod: (input.requestApiMethod || 'GET').toUpperCase(),
-        requestApiUrlParam: input.requestApiUrlParam || 'url',
-        requestApiHeaders: parseJsonObjectInput(input.requestApiHeadersJson || envRequestApiHeaders, {}),
-        useBrowserFallback: input.useBrowserFallback !== false,
-        requestTimeoutSecs: Number.isFinite(+input.requestTimeoutSecs) ? Math.max(5, +input.requestTimeoutSecs) : 45,
-        requestDelayMillis: Number.isFinite(+input.requestDelayMillis) ? Math.max(0, +input.requestDelayMillis) : 350,
-        browserUserAgent: USER_AGENTS[(input.headerProfile && input.headerProfile !== 'auto') ? input.headerProfile : 'firefox'],
+        requestApiMethod: 'GET',
+        requestApiUrlParam: 'url',
+        requestApiHeaders: parseJsonObjectInput(envRequestApiHeaders, {}),
+        requestTimeoutSecs: 45,
+        requestDelayMillis: 350,
     };
 }
 
-async function fetchThroughTransport(targetUrl, profileName, transportConfig, proxyConfiguration) {
-    const targetHeaders = buildHeaders(profileName, targetUrl, transportConfig.customHeaders);
+async function fetchThroughTransport(targetUrl, profileName, transportConfig) {
+    const targetHeaders = buildHeaders(targetUrl, transportConfig.customHeaders);
     let requestUrl = targetUrl;
-    const options = {
-        method: 'GET',
-        headers: targetHeaders,
-        timeout: { request: transportConfig.requestTimeoutSecs * 1000 },
-        responseType: 'text',
-        throwHttpErrors: false,
-        retry: { limit: 0 },
-        https: { rejectUnauthorized: false },
-    };
+    const options = { method: 'GET', headers: targetHeaders };
 
     if (transportConfig.requestTransport === 'custom_request_api') {
         requestUrl = transportConfig.requestApiUrlTemplate;
         options.method = transportConfig.requestApiMethod;
-        options.headers = transportConfig.requestApiHeaders;
-
-        if (!requestUrl) {
-            throw new Error('requestApiUrlTemplate is required for custom_request_api transport');
-        }
-
+        options.headers = { ...transportConfig.requestApiHeaders };
+        if (!requestUrl) throw new Error('requestApiUrlTemplate is required for custom_request_api transport');
         if (requestUrl.includes('{url}')) {
             requestUrl = requestUrl.replaceAll('{url}', encodeURIComponent(targetUrl));
         } else if (options.method === 'GET') {
@@ -449,62 +421,43 @@ async function fetchThroughTransport(targetUrl, profileName, transportConfig, pr
             apiUrl.searchParams.set(transportConfig.requestApiUrlParam, targetUrl);
             requestUrl = apiUrl.toString();
         } else {
-            options.json = {
-                [transportConfig.requestApiUrlParam]: targetUrl,
-                headers: targetHeaders,
-            };
+            options.headers['content-type'] = 'application/json';
+            options.body = JSON.stringify({ [transportConfig.requestApiUrlParam]: targetUrl, headers: targetHeaders });
         }
-    } else if (transportConfig.requestTransport === 'apify_proxy_http' && proxyConfiguration) {
-        options.proxyUrl = await proxyConfiguration.newUrl();
     }
 
-    const response = await gotScraping({ url: requestUrl, ...options });
-    const bodyText = typeof response.body === 'string' ? response.body : JSON.stringify(response.body ?? '');
-
+    const client = await transportConfig.sessions.get(profileName);
+    const response = await client.fetch(requestUrl, options);
     return {
-        statusCode: response.statusCode || 0,
-        headers: response.headers || {},
-        bodyText,
+        statusCode: response.status,
+        headers: Object.fromEntries(response.headers),
+        bodyText: await response.text(),
         requestUrl,
     };
 }
 
-async function tryHttpRequestVariants(targetUrl, transportConfig, proxyConfiguration) {
+async function tryHttpRequestVariants(targetUrl, transportConfig) {
     let lastResult;
-
     for (const profileName of transportConfig.headerProfiles) {
-        const response = await fetchThroughTransport(targetUrl, profileName, transportConfig, proxyConfiguration);
+        const response = await fetchWithRecovery(
+            () => fetchThroughTransport(targetUrl, profileName, transportConfig),
+            { log, retire: () => transportConfig.sessions.retire(profileName) },
+        ).catch(() => undefined);
+        if (!response) continue;
         const payload = unwrapResponsePayload(response.bodyText, response.headers);
-        const blocked = responseLooksBlocked(response.statusCode, payload.text);
-
-        log.info(`HTTP ${profileName} -> ${response.statusCode} for ${targetUrl}`);
-
-        lastResult = {
-            ...response,
-            ...payload,
-            usedProfile: profileName,
-            blocked,
-        };
-
-        if (!blocked && response.statusCode >= 200 && response.statusCode < 300) {
-            return lastResult;
-        }
+        const blocked = isBlocked(response.statusCode, payload.text) || isBlocked(response.statusCode, response.bodyText);
+        log.debug(`HTTP ${profileName} -> ${response.statusCode}`);
+        lastResult = { ...response, ...payload, usedProfile: profileName, blocked };
+        if (!blocked && response.statusCode >= 200 && response.statusCode < 300) return lastResult;
+        await readDiscovery(log);
+        transportConfig.sessions.retire(profileName);
+        // Permanent errors do not become valid by cycling browser profiles.
+        if ([400, 404, 405, 410, 422].includes(response.statusCode)) break;
     }
-
     return lastResult;
 }
 
-function parsePlaywrightProxy(proxyUrl) {
-    if (!proxyUrl) return undefined;
-    const parsed = new URL(proxyUrl);
-    return {
-        server: `${parsed.protocol}//${parsed.hostname}:${parsed.port}`,
-        username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
-        password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
-    };
-}
-
-async function runHttpDiscovery(startTargets, transportConfig, proxyConfiguration, state) {
+async function runHttpDiscovery(startTargets, transportConfig, state) {
     const pending = [...startTargets];
 
     while (pending.length && state.saved < state.resultsWanted) {
@@ -516,173 +469,62 @@ async function runHttpDiscovery(startTargets, transportConfig, proxyConfiguratio
             await sleep(transportConfig.requestDelayMillis);
         }
 
-        const response = await tryHttpRequestVariants(targetUrl, transportConfig, proxyConfiguration).catch((error) => {
-            log.warning(`HTTP request failed for ${targetUrl}: ${error.message}`);
+        // The listing API pages with a `page` parameter; satisfy large limits over
+        // HTTP instead of switching to the slower browser phase.
+        if (isSearchApiUrl(targetUrl)) {
+            let page = 1;
+            while (state.saved < state.resultsWanted && page <= state.maxPages) {
+                const response = await tryHttpRequestVariants(withPage(targetUrl, page), transportConfig)
+                    .catch((error) => {
+                        log.warning(`Search request failed (${safeError(error)})`);
+                        return undefined;
+                    });
+                if (!response || response.blocked || response.statusCode < 200 || response.statusCode >= 300) break;
+                const before = state.saved;
+                const { records } = collectRecordsAndTargets(response, `search_api_${response.usedProfile}`);
+                await pushUniqueRecords(records, state, `search page ${page}`);
+                if (!records.length || state.saved === before) break;
+                page++;
+                if (transportConfig.requestDelayMillis > 0) await sleep(transportConfig.requestDelayMillis);
+            }
+            continue;
+        }
+
+        const response = await tryHttpRequestVariants(targetUrl, transportConfig).catch((error) => {
+            log.warning(`Request failed (${safeError(error)})`);
             return undefined;
         });
 
-        if (!response) continue;
+        if (!response || response.blocked || response.statusCode < 200 || response.statusCode >= 300) {
+            state.failedTargets.add(targetUrl);
+            continue;
+        }
 
         const extractionMethod = targetUrl.includes('helix.carfax.com')
             ? `helix_http_${response.usedProfile}`
             : `http_${response.usedProfile}`;
 
-        const { records, detailTargets } = collectRecordsAndTargets(response, extractionMethod);
+        const { records } = collectRecordsAndTargets(response, extractionMethod);
+        if (!records.length) {
+            await readDiscovery(log);
+            state.failedTargets.add(targetUrl);
+            log.warning('Response has no usable vehicle data; browser refresh may be required');
+        }
         await pushUniqueRecords(records, state, extractionMethod);
-
-        for (const detailTarget of detailTargets) {
-            if (!state.visitedTargets.has(detailTarget)) pending.push(detailTarget);
-        }
     }
 }
 
-async function runBrowserFallback(startTargets, transportConfig, proxyConfiguration, maxPages, state) {
-    const browserVisitedTargets = new Set();
-    let proxy;
-    if (proxyConfiguration && (IS_AT_HOME || transportConfig.requestTransport === 'apify_proxy_http')) {
-        proxy = parsePlaywrightProxy(await proxyConfiguration.newUrl());
-    }
-
-    const browser = await firefox.launch({
-        headless: true,
-        proxy,
-    });
-
-    const context = await browser.newContext({
-        locale: 'en-US',
-        userAgent: transportConfig.browserUserAgent,
-        viewport: { width: 1440, height: 900 },
-    });
-
-    await context.route('**/*', (route) => {
-        const resourceType = route.request().resourceType();
-        const reqUrl = route.request().url();
-        if (['image', 'media', 'font'].includes(resourceType)) return route.abort();
-        if (reqUrl.includes('google-analytics') || reqUrl.includes('googletagmanager') || reqUrl.includes('doubleclick')) {
-            return route.abort();
-        }
-        return route.continue();
-    });
-
-    const pending = [...startTargets];
-
+export async function main() {
     try {
-        while (pending.length && state.saved < state.resultsWanted) {
-            const targetUrl = pending.shift();
-            if (!targetUrl || browserVisitedTargets.has(targetUrl)) continue;
-            browserVisitedTargets.add(targetUrl);
-
-            const page = await context.newPage();
-            const apiRecords = [];
-            let processedCount = 0;
-
-            const flushCapturedRecords = async (tag) => {
-                const pendingRecords = apiRecords.slice(processedCount);
-                processedCount = apiRecords.length;
-                await pushUniqueRecords(pendingRecords, state, tag);
-            };
-
-            const onResponse = async (response) => {
-                try {
-                    const responseUrl = response.url();
-                    const contentType = (response.headers()['content-type'] || '').toLowerCase();
-                    if (!isHelixResponse(responseUrl, contentType)) return;
-
-                    const payload = await response.json();
-                    const candidates = collectVehicleCandidates(payload);
-                    for (const candidate of candidates) {
-                        const mapped = mapVehicle(candidate, 'browser_helix_api');
-                        if (mapped) apiRecords.push(mapped);
-                    }
-                } catch (error) {
-                    log.debug('Browser response parse failed', { message: error.message });
-                }
-            };
-
-            page.on('response', onResponse);
-
-            try {
-                const response = await page.goto(targetUrl, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: transportConfig.requestTimeoutSecs * 1000,
-                }).catch(() => undefined);
-
-                const statusCode = response?.status() || 0;
-                log.info(`Browser navigation -> ${statusCode} for ${targetUrl}`);
-
-                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-                await flushCapturedRecords('browser initial responses');
-
-                const html = await page.content();
-                const { records, detailTargets } = collectRecordsAndTargets({ text: html, contentType: 'text/html' }, 'browser_html');
-                await pushUniqueRecords(records, state, 'browser html');
-                for (const detailTarget of detailTargets) {
-                    if (!browserVisitedTargets.has(detailTarget)) pending.push(detailTarget);
-                }
-
-                if (!/helix\.carfax\.com\/search\/v2\/vehicles|\/vehicle\//i.test(targetUrl)) {
-                    let pageNumber = 1;
-                    while (state.saved < state.resultsWanted && pageNumber < maxPages) {
-                        const hasNext = await page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button.pagination_pages_nav:not([disabled])'));
-                            return buttons.some((button) => /next/i.test(button.textContent || ''));
-                        }).catch(() => false);
-
-                        if (!hasNext) break;
-
-                        const clicked = await page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button.pagination_pages_nav:not([disabled])'));
-                            const nextBtn = buttons.find((button) => /next/i.test(button.textContent || ''));
-                            if (!nextBtn) return false;
-                            nextBtn.click();
-                            return true;
-                        }).catch(() => false);
-
-                        if (!clicked) break;
-
-                        pageNumber += 1;
-                        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-                        await page.waitForTimeout(1500);
-                        await flushCapturedRecords(`browser page ${pageNumber} responses`);
-
-                        const nextHtml = await page.content();
-                        const nextPayload = collectRecordsAndTargets({ text: nextHtml, contentType: 'text/html' }, `browser_html_page_${pageNumber}`);
-                        await pushUniqueRecords(nextPayload.records, state, `browser page ${pageNumber} html`);
-                        for (const detailTarget of nextPayload.detailTargets) {
-                            if (!browserVisitedTargets.has(detailTarget)) pending.push(detailTarget);
-                        }
-                    }
-                }
-            } finally {
-                page.removeListener('response', onResponse);
-                await page.close().catch(() => {});
-            }
-        }
-    } finally {
-        await context.close().catch(() => {});
-        await browser.close().catch(() => {});
-    }
-}
-
-async function main() {
-    try {
-        let input = (await Actor.getInput()) || {};
-        if (!IS_AT_HOME && Object.keys(input).length === 0) {
-            const localInput = await readFile(new URL('../INPUT.json', import.meta.url), 'utf8')
-                .then((contents) => safeJsonParse(contents))
-                .catch(() => undefined);
-
-            if (localInput && typeof localInput === 'object') {
-                input = localInput;
-                log.info('Loaded local INPUT.json for npm start run');
-            }
-        }
+        // Re-read the documented request flow before any request so recovery
+        // decisions always start from the current API structure.
+        await readDiscovery(log);
+        const input = (await Actor.getInput()) || {};
 
         const {
             startUrl,
             startUrls,
             url,
-            vin,
             make,
             model,
             year_min,
@@ -696,32 +538,9 @@ async function main() {
             max_pages: maxPagesRaw = 10,
         } = input;
 
-        const resultsWanted = Number.isFinite(+resultsWantedRaw) ? Math.max(1, +resultsWantedRaw) : 20;
-        const maxPages = Number.isFinite(+maxPagesRaw) ? Math.max(1, +maxPagesRaw) : 10;
+        const resultsWanted = positiveInteger(resultsWantedRaw, 'results_wanted');
+        const maxPages = positiveInteger(maxPagesRaw, 'max_pages');
         const transportConfig = resolveTransportConfig(input);
-
-        const buildStartUrl = () => {
-            const baseUrl = 'https://www.carfax.com/';
-            let path = 'Cars';
-
-            if (make && model) {
-                path = `Used-${make}-${model}`.replace(/\s+/g, '-');
-            } else if (make) {
-                path = `Used-${make}`.replace(/\s+/g, '-');
-            } else {
-                path = 'cars-for-sale';
-            }
-
-            const params = new URLSearchParams();
-            if (year_min) params.set('yearMin', year_min);
-            if (year_max) params.set('yearMax', year_max);
-            if (price_min) params.set('priceMin', price_min);
-            if (price_max) params.set('priceMax', price_max);
-            if (mileage_max) params.set('mileageMax', mileage_max);
-            if (location) params.set('location', location);
-
-            return params.toString() ? `${baseUrl}${path}?${params}` : `${baseUrl}${path}`;
-        };
 
         const normalizeStartUrl = (entry) => {
             if (!entry) return undefined;
@@ -730,56 +549,71 @@ async function main() {
             return undefined;
         };
 
+        const hasFilters = [make, model, year_min, year_max, price_min, price_max, mileage_max, location]
+            .some((value) => value !== undefined && value !== null && String(value).trim() !== '');
+
         const initial = [];
-        if (Array.isArray(startUrls) && startUrls.length) {
+        // A custom URL wins, then filters, then the documented default URL. A
+        // schema-defaulted URL must never override a caller's filter search.
+        if (Array.isArray(startUrls)) {
             for (const candidate of startUrls) {
                 const normalized = normalizeStartUrl(candidate);
-                if (normalized) initial.push(normalized);
+                if (normalized) initial.push(validateTarget(normalized));
             }
         }
-        if (startUrl) initial.push(startUrl);
-        if (url) initial.push(url);
-        if (!initial.length) initial.push(buildStartUrl());
+        for (const candidate of [url, startUrl]) {
+            if (candidate?.trim() && !(hasFilters && candidate.trim() === DEFAULT_START_URL)) initial.push(validateTarget(candidate));
+        }
+        if (!initial.length) {
+            initial.push(hasFilters
+                ? buildSearchApiUrl({ make, model, year_min, year_max, price_min, price_max, mileage_max, location })
+                : DEFAULT_START_URL);
+        }
 
-        const directVin = normalizeVin(vin);
-        if (directVin) initial.unshift(buildHelixVehicleUrl(directVin));
-
-        const shouldCreateProxy = IS_AT_HOME || transportConfig.requestTransport === 'apify_proxy_http';
-        const proxyConfiguration = shouldCreateProxy
-            ? await Actor.createProxyConfiguration(
-                proxyConfigInput || {
-                    useApifyProxy: true,
-                    apifyProxyGroups: ['RESIDENTIAL'],
-                },
-            )
-            : undefined;
+        const proxyInput = proxyConfigInput ?? { useApifyProxy: false };
+        const shouldCreateProxy = (proxyInput.proxyUrls?.length > 0)
+            || (proxyInput.useApifyProxy !== false && (IS_AT_HOME || transportConfig.requestTransport === 'apify_proxy_http'));
+        const proxyConfiguration = shouldCreateProxy ? await Actor.createProxyConfiguration(proxyInput) : undefined;
+        if (transportConfig.requestTransport === 'apify_proxy_http' && !proxyConfiguration) {
+            throw new Error('apify_proxy_http requires an enabled proxyConfiguration');
+        }
+        transportConfig.sessions = new HttpSessions(transportConfig, proxyConfiguration);
 
         const state = {
             saved: 0,
             resultsWanted,
+            maxPages,
             seenKeys: new Set(),
             visitedTargets: new Set(),
+            failedTargets: new Set(),
         };
 
-        log.info(`Starting Carfax API actor for URLs: ${initial.join(', ')}`);
-        log.info(`Resolved request transport: ${transportConfig.requestTransport}; header profiles: ${transportConfig.headerProfiles.join(', ')}`);
+        log.info(`Starting Carfax actor | limit=${resultsWanted}`);
+        log.debug(`Transport: ${transportConfig.requestTransport}; profiles: ${transportConfig.headerProfiles.join(', ')}`);
 
-        if (transportConfig.requestTransport !== 'browser_firefox') {
-            await runHttpDiscovery(initial, transportConfig, proxyConfiguration, state);
-        }
-
-        if (state.saved < resultsWanted && transportConfig.useBrowserFallback) {
-            log.info(`Switching to browser fallback after HTTP phase. Current total: ${state.saved}/${resultsWanted}`);
-            await runBrowserFallback(initial, transportConfig, proxyConfiguration, maxPages, state);
-        }
+        await runHttpDiscovery(initial, transportConfig, state);
 
         log.info(`Finished. Total saved: ${state.saved} vehicles`);
-    } finally {
-        await Actor.exit();
+        if (!state.saved) throw new Error('No vehicle records extracted. Review API_DISCOVERY.md and the current target/proxy response.');
+        if (state.saved < resultsWanted) {
+            log.warning(`Collected ${state.saved} of ${resultsWanted} requested vehicles; the source returned no more.`);
+        }
+    } catch (error) {
+        log.error(safeError(error));
+        await Actor.exit({ exitCode: 1 });
+        return;
     }
+    await Actor.exit();
 }
 
-main().catch((err) => {
-    console.error('Actor failed:', err);
-    process.exit(1);
-});
+function positiveInteger(value, name) {
+    if (!Number.isInteger(Number(value)) || Number(value) < 1) throw new Error(`${name} must be a positive integer`);
+    return Number(value);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    await Actor.init();
+    await main();
+}
+
+export { collectRecordsAndTargets, resolveTransportConfig, tryHttpRequestVariants, pushUniqueRecords };

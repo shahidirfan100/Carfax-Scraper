@@ -1,109 +1,89 @@
-# Carfax Used Cars Scraper
+## What does Carfax Used Cars Scraper do?
 
-Extract comprehensive used car listings from Carfax.com with detailed vehicle information, Carfax history reports, and pricing data.
+Carfax Used Cars Scraper collects used vehicle listings from Carfax.com and saves them as a clean, structured dataset. Give it a Carfax search URL, a make and model, or a set of filters such as year, price, mileage, and ZIP code, and it returns vehicle details including price, mileage, VIN, engine, transmission, drive type, dealer information, and vehicle history indicators. It is built for used car market research, inventory monitoring, price comparison, and automotive data pipelines.
 
----
+## Why use Carfax Used Cars Scraper?
 
-## Features
+- **Structured vehicle data** - Turn Carfax search results into ready-to-use records instead of copying listings by hand.
+- **Flexible search** - Start from any Carfax search URL, or search by make, model, location, and filters.
+- **Rich, decision-ready fields** - Capture pricing, mileage, dealer details, colors, specs, images, and history flags in one run.
+- **Fast and reliable** - Results are saved in batches as they are found, and the Actor manages retries and recovery on its own.
+- **Automation ready** - Export to JSON, CSV, Excel, or XML, or send results to Google Sheets, webhooks, Make, Zapier, or your own API.
+- **Schedule friendly** - Run on demand or on a schedule to keep a fresh picture of available inventory.
 
-- **Complete Vehicle Data** - Scrape title, price, mileage, VIN, engine specs, transmission, and drive type
-- **Vehicle History Signals** - Capture one-owner, no-accident, and service-record indicators when available
-- **Flexible Filtering** - Search by make, model, year range, price range, mileage, and location
-- **Custom Start URLs** - Provide any Carfax search URL to scrape specific results
-- **Pagination Handling** - Automatically navigates through multiple pages of results
-- **Clean Output Quality** - Removes duplicate entries and omits empty fields from exported records
-- **Transport Selection** - Switch between direct HTTP, Apify Proxy HTTP, custom request APIs, and Firefox browser fallback
-- **Residential Proxy Support** - Built-in proxy configuration for reliable scraping
+## What data can you extract from Carfax?
 
----
+| Field | Description |
+|-------|-------------|
+| `title` | Full vehicle title, such as 2024 Ford F-150 XLT |
+| `price` | Listed price in USD |
+| `list_price` | Original or list price when published |
+| `one_price` | One-price value or price comparison when shown |
+| `mileage` | Odometer reading |
+| `vin` | Vehicle Identification Number |
+| `year` | Model year |
+| `make` | Vehicle make |
+| `model` | Vehicle model |
+| `trim` | Trim level |
+| `body_type` | Body style, such as Pickup or SUV |
+| `vehicle_condition` | Condition label, such as Used |
+| `exterior_color` | Exterior color |
+| `interior_color` | Interior color |
+| `engine` | Engine description |
+| `transmission` | Transmission type |
+| `drivetype` | Drive configuration, such as FWD, AWD, or 4WD |
+| `mpg_city` | Estimated city fuel economy |
+| `mpg_highway` | Estimated highway fuel economy |
+| `dealer_name` | Selling dealer name |
+| `dealer_city` | Dealer city |
+| `dealer_state` | Dealer state |
+| `dealer_zip` | Dealer ZIP code |
+| `dealer_phone` | Dealer phone number |
+| `distance_to_dealer` | Approximate distance when available |
+| `badge` | Deal or value badge, such as Great Value |
+| `one_owner` | One-owner history indicator |
+| `no_accidents` | No-accident history indicator |
+| `service_records` | Service history indicator |
+| `image_url` | Primary listing image URL |
+| `images` | Additional listing image URLs |
+| `monthly_payment_estimate` | Estimated monthly financing values |
+| `price_history` | Historical price change entries |
+| `top_options` | Highlighted features and options |
+| `other_options` | Additional features and options |
+| `url` | Direct link to the vehicle listing |
+| `source` | Source website, `carfax.com` |
+| `scraped_at` | ISO timestamp for when the record was collected |
 
-## Use Cases
+## How to use Carfax Used Cars Scraper
 
-| Use Case | Description |
-|----------|-------------|
-| **Market Research** | Analyze used car pricing trends by make, model, and region |
-| **Price Comparison** | Compare vehicle prices across different dealers and locations |
-| **Inventory Monitoring** | Track available inventory for specific vehicle types |
-| **Lead Generation** | Build dealer and vehicle databases for automotive businesses |
-| **Data Analytics** | Aggregate vehicle data for machine learning and analysis |
-
----
+1. Open the Actor on Apify Store.
+2. Enter a Carfax search URL, or provide a make and model with optional filters.
+3. Set the maximum number of vehicles and, if needed, the page limit.
+4. Run the Actor.
+5. Download the dataset, or connect it to a spreadsheet, webhook, or workflow.
 
 ## Input Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `startUrl` | string | A specific Carfax search URL to scrape |
-| `vin` | string | Optional VIN for direct detail lookup |
-| `make` | string | Vehicle make (e.g., "Ford", "Toyota") |
-| `model` | string | Vehicle model (e.g., "F-150", "Camry") |
-| `year_min` | integer | Minimum model year filter |
-| `year_max` | integer | Maximum model year filter |
-| `price_min` | integer | Minimum price in USD |
-| `price_max` | integer | Maximum price in USD |
-| `mileage_max` | integer | Maximum mileage filter |
-| `location` | string | Location or ZIP code |
-| `results_wanted` | integer | Maximum vehicles to collect (default: 20) |
-| `max_pages` | integer | Maximum pages to visit (default: 10) |
-| `requestTransport` | string | Request strategy: auto, direct HTTP, Apify Proxy HTTP, custom request API, or Firefox only |
-| `headerProfile` | string | Header profile: auto, Firefox, Chrome, mobile web, or mobile app |
-| `customHeadersJson` | string | Optional JSON object merged into outbound target headers |
-| `requestApiUrlTemplate` | string | Optional external request API URL with `{url}` placeholder or target URL parameter |
-| `requestApiMethod` | string | Method for the custom request API call (`GET` or `POST`) |
-| `requestApiUrlParam` | string | Field name used when the custom request API expects a target URL parameter |
-| `requestApiHeadersJson` | string | Optional JSON object of headers sent to the custom request API |
-| `useBrowserFallback` | boolean | Whether to retry with Firefox if HTTP methods do not return vehicle data |
-| `requestTimeoutSecs` | integer | Per-request timeout in seconds |
-| `requestDelayMillis` | integer | Delay between detail requests to reduce rate limiting |
-| `proxyConfiguration` | object | Proxy settings |
-
----
-
-## Output Data
-
-Each scraped vehicle includes the following fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `title` | string | Full vehicle title (Year Make Model Trim) |
-| `price` | integer | Listed price in USD |
-| `currency` | string | Currency code (USD) |
-| `list_price` | integer | Original listing price when present |
-| `one_price` | integer | One-price value when provided |
-| `mileage` | integer | Odometer reading |
-| `body_type` | string | Vehicle body style |
-| `vehicle_condition` | string | Condition label (for example, Used) |
-| `vin` | string | Vehicle Identification Number |
-| `dealer_city` | string | Dealer city |
-| `dealer_state` | string | Dealer state |
-| `dealer_zip` | string | Dealer ZIP code |
-| `dealer_phone` | string | Dealer phone number |
-| `image_url` | string | Primary vehicle image URL |
-| `images` | array | Additional listing image URLs |
-| `drivetype` | string | Drive configuration (FWD, AWD, 4WD) |
-| `engine` | string | Engine specifications |
-| `transmission` | string | Transmission type |
-| `exterior_color` | string | Exterior color |
-| `interior_color` | string | Interior color |
-| `mpg_city` | integer | Estimated city MPG |
-| `mpg_highway` | integer | Estimated highway MPG |
-| `one_owner` | boolean | One-owner indicator |
-| `no_accidents` | boolean | No-accident indicator |
-| `service_records` | boolean | Service records indicator |
-| `monthly_payment_estimate` | object | Estimated financing values |
-| `price_history` | array | Historical price change entries |
-| `top_options` | array | Top listed options/features |
-| `other_options` | array | Additional listed options/features |
-| `url` | string | Direct link to vehicle listing |
-| `scraped_at` | string | Timestamp of data extraction |
-| `source` | string | Source website (carfax.com) |
-| `extraction_method` | string | Internal extraction source label |
-
----
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `startUrl` | String | No | `https://www.carfax.com/Used-Pickups_bt6` | A Carfax search URL. A custom URL takes priority over filters |
+| `location` | String | No | - | ZIP code or location to search near; used with make and model |
+| `make` | String | No | - | Vehicle make, such as Ford or Toyota |
+| `model` | String | No | - | Vehicle model, such as F-150 or Camry |
+| `year_min` | Integer | No | - | Minimum model year |
+| `year_max` | Integer | No | - | Maximum model year |
+| `price_min` | Integer | No | - | Minimum price in USD |
+| `price_max` | Integer | No | - | Maximum price in USD |
+| `mileage_max` | Integer | No | - | Maximum mileage |
+| `results_wanted` | Integer | No | `20` | Maximum number of vehicles to save |
+| `max_pages` | Integer | No | `10` | Safety cap on the number of result pages to visit |
+| `proxyConfiguration` | Object | No | Disabled | Optional Apify Proxy settings. Unblocker is recommended when enabled |
 
 ## Usage Examples
 
-### Search by Start URL
+### Collect vehicles from a search URL
+
+Collect listings from a Carfax category page:
 
 ```json
 {
@@ -112,31 +92,9 @@ Each scraped vehicle includes the following fields:
 }
 ```
 
-### Use a Custom Request API Locally
+### Search by make and model
 
-```json
-{
-  "startUrl": "https://www.carfax.com/Used-Pickups_bt6",
-  "requestTransport": "custom_request_api",
-  "requestApiUrlTemplate": "https://your-request-api.example.com/fetch?url={url}",
-  "requestApiHeadersJson": "{\"Authorization\":\"Bearer YOUR_TOKEN\"}",
-  "headerProfile": "auto",
-  "results_wanted": 20
-}
-```
-
-### Direct VIN Lookup
-
-```json
-{
-  "vin": "3GKALTEV5KL310415",
-  "requestTransport": "apify_proxy_http",
-  "headerProfile": "firefox",
-  "results_wanted": 1
-}
-```
-
-### Search by Make and Model
+Collect Ford F-150 listings with a model year and price range:
 
 ```json
 {
@@ -149,7 +107,9 @@ Each scraped vehicle includes the following fields:
 }
 ```
 
-### Search by Location and Price Range
+### Search by location and filters
+
+Collect Toyota vehicles near a ZIP code within a price and mileage range:
 
 ```json
 {
@@ -162,92 +122,115 @@ Each scraped vehicle includes the following fields:
 }
 ```
 
----
+### Use a proxy for larger or repeated runs
+
+Enable Apify Proxy and choose the Unblocker group when you need the highest reliability:
+
+```json
+{
+  "startUrl": "https://www.carfax.com/Used-Pickups_bt6",
+  "results_wanted": 200,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["UNBLOCKER"]
+  }
+}
+```
 
 ## Sample Output
 
 ```json
 {
+  "vin": "1FTFW1E87NFA12345",
   "title": "2024 Ford F-150 XLT",
+  "year": 2024,
+  "make": "Ford",
+  "model": "F-150",
+  "trim": "XLT",
+  "body_type": "Pickup",
+  "vehicle_condition": "USED",
   "price": 45990,
   "list_price": 46490,
   "currency": "USD",
   "mileage": 12500,
-  "body_type": "Pickup",
-  "vin": "1FTFW1E87NFA12345",
+  "mileage_label": "12,500",
+  "badge": "GREAT",
+  "stock_number": "N6T388A",
+  "image_url": "https://carfax-img.vast.com/carfax/.../1/344x258",
+  "url": "https://www.carfax.com/vehicle/1FTFW1E87NFA12345",
+  "dealer_name": "Example Motors",
   "dealer_city": "Columbus",
   "dealer_state": "GA",
   "dealer_zip": "31901",
   "dealer_phone": "7065550101",
-  "image_url": "https://carfax-img.vast.com/carfax/...",
-  "images": [
-    "https://carfax-img.vast.com/carfax/.../1/344x258",
-    "https://carfax-img.vast.com/carfax/.../2/344x258"
-  ],
-  "drivetype": "Four-Wheel Drive",
-  "engine": "6 Cyl",
-  "transmission": "Automatic",
+  "distance_to_dealer": 0,
   "exterior_color": "Blue",
   "interior_color": "Black",
+  "engine": "6 Cyl",
+  "transmission": "Automatic",
+  "drivetype": "Four-Wheel Drive",
+  "mpg_city": 18,
+  "mpg_highway": 24,
   "one_owner": true,
   "no_accidents": true,
   "service_records": true,
-  "monthly_payment_estimate": {
-    "monthlyPayment": 712.18,
-    "interestRate": 7.1,
-    "termInMonths": 60
-  },
   "top_options": ["Tow Package", "Heated Seats"],
-  "url": "https://www.carfax.com/vehicle/1FTFW1E87NFA12345",
   "scraped_at": "2026-01-21T13:30:00.000Z",
-  "source": "carfax.com",
-  "extraction_method": "helix_api"
+  "source": "carfax.com"
 }
 ```
 
----
-
 ## Tips for Best Results
 
-1. **Use Residential Proxies** - Carfax has anti-bot protection; residential proxies provide the best success rate
-2. **Start with Default Settings** - The default `results_wanted: 20` is optimized for quick runs
-3. **Use Start URLs for Specific Searches** - Pre-configure complex filters on Carfax.com and use the resulting URL
-4. **Use a Custom Request API Locally** - If direct local requests are blocked, provide your own request API URL in the input or set `CARFAX_REQUEST_API_URL` in the shell before running
-5. **Monitor Rate Limits** - Increase `requestDelayMillis` or reduce `results_wanted` when Helix detail requests begin returning `429`
-
----
+- **Start with the defaults** - The default result limit is a quick way to confirm the Actor works before larger runs.
+- **Use a search URL for exact results** - Pre-set complex filters on Carfax.com, then use the resulting URL as `startUrl`.
+- **Use make and model for broad searches** - Filter searches return many results quickly and page through automatically.
+- **Keep the proxy disabled until you need it** - Most runs finish without a proxy; enable Apify Proxy with the Unblocker group if you run into blocks or need greater reliability.
+- **Raise limits for bigger jobs** - Increase `results_wanted` and, if needed, `max_pages` to collect more vehicles per run.
+- **Check a few records first** - Some fields are empty when Carfax does not publish them, so review several results before assuming a problem.
 
 ## Integrations
 
-Connect your scraped data to other services:
+- **Google Sheets** - Send vehicle listings to a shared spreadsheet for analysis.
+- **Webhooks** - Trigger downstream systems when a run finishes.
+- **Make and Zapier** - Connect results to no-code automations.
+- **API** - Read datasets programmatically from your own tools.
+- **Exports** - Download results as JSON, CSV, Excel, XML, and other supported formats.
 
-- **Google Sheets** - Export vehicle listings for analysis
-- **Slack** - Get notifications when new vehicles match your criteria
-- **Zapier** - Automate workflows with scraped data
-- **Webhooks** - Send data to your own APIs in real-time
-- **Amazon S3** - Store large datasets in cloud storage
+## Frequently Asked Questions
 
----
+### How many vehicles can I collect in one run?
 
-## FAQ
+You can collect thousands by raising `results_wanted`. For very large jobs, split the work across multiple runs or schedules to stay within proxy and rate limits.
 
-**Q: How many vehicles can I scrape?**
-A: You can scrape thousands of vehicles by adjusting `results_wanted`. For very large jobs, consider using multiple runs.
+### Can I export the data to CSV or Excel?
 
-**Q: Why do I need residential proxies?**
-A: Carfax employs anti-bot protection that blocks datacenter IPs. Residential proxies simulate real user traffic.
+Yes. Apify datasets can be downloaded as CSV, Excel, JSON, XML, and other supported formats, and connected to Google Sheets or an API.
 
-**Q: Can I use my own request API instead of Apify Proxy?**
-A: Yes. Set `requestTransport` to `custom_request_api` and provide `requestApiUrlTemplate` plus any required API headers. For local shell runs you can also set `CARFAX_REQUEST_API_URL` and `CARFAX_REQUEST_API_HEADERS` environment variables.
+### Can I search by make, model, and location?
 
-**Q: Can I scrape specific dealer inventory?**
-A: Yes, find the dealer's Carfax page URL and use it as the `startUrl`.
+Yes. Provide `make`, `model`, and `location`, and optionally add year, price, and mileage filters. A custom `startUrl` takes priority over filters.
 
-**Q: How often is the data updated?**
-A: The scraper extracts live data from Carfax. Run it regularly to get the latest listings.
+### Do I need a proxy?
 
----
+No. No proxy is used by default, and most searches complete without one. If requests are blocked, enable Apify Proxy with the Unblocker group for the highest reliability.
+
+### Can I run this Actor on a schedule?
+
+Yes. Use Apify schedules to run the Actor hourly, daily, weekly, or at another interval to keep your dataset current.
+
+### Why are some fields empty?
+
+Some fields are only present when Carfax publishes that information, such as dealer phone numbers, financing estimates, or history flags. Check multiple records before assuming a problem.
+
+### Is it legal to scrape Carfax?
+
+This Actor is intended for collecting publicly available listing information. You are responsible for complying with Carfax terms of service, applicable laws, and privacy requirements.
+
+## Support
+
+For issues, missing fields, or feature requests, use the Issues tab on the Actor page and include your input and a short description of what you expected.
 
 ## Legal Notice
 
-This scraper is provided for educational and research purposes. Users are responsible for ensuring their use complies with Carfax's Terms of Service and all applicable laws. The scraper should be used responsibly and ethically.
+This Actor is provided for legitimate collection of publicly available information. Users are responsible for ensuring their use complies with Carfax terms of service and all applicable laws.

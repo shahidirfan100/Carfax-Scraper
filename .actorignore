@@ -1,0 +1,4 @@
+storage/
+qa-artifacts/
+node_modules/
+.git/
